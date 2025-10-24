@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Personalien-Extractor</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--accent:#06b6d4;--muted:#94a3b8;--glass:rgba(255,255,255,0.03)}
+    body{font-family:Inter,Segoe UI,Roboto,Arial;margin:0;background:linear-gradient(180deg,#071025 0%, #0b1220 100%);color:#e6eef6;padding:24px}
+    .container{max-width:980px;margin:0 auto}
+    header{display:flex;align-items:center;gap:16px}
+    h1{margin:0;font-size:20px}
+    p.lead{margin:4px 0 18px;color:var(--muted)}
+    textarea{width:100%;min-height:200px;padding:12px;border-radius:8px;background:var(--glass);border:1px solid rgba(255,255,255,0.04);color:inherit;resize:vertical}
+    button{background:var(--accent);border:none;color:#042027;padding:8px 12px;border-radius:8px;cursor:pointer}
+    .controls{display:flex;gap:8px;margin-top:10px}
+    .results{margin-top:18px;display:grid;grid-template-columns:1fr;gap:12px}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.03)}
+    .field{display:flex;align-items:center;gap:8px;margin:6px 0}
+    .label{min-width:180px;color:var(--muted);font-size:13px}
+    .value{flex:1;word-break:break-word}
+    .copy-btn{background:transparent;border:1px solid rgba(255,255,255,0.04);padding:6px 8px;border-radius:8px;color:var(--muted);cursor:pointer}
+    .person-header{display:flex;justify-content:space-between;align-items:center}.toggle-btn{background:#1f2937;border:1px solid rgba(255,255,255,0.03);padding:4px 8px;border-radius:6px;color:var(--muted);cursor:pointer;font-size:12px;margin-left:8px}.export-json{background:#1f2937;border:1px solid rgba(255,255,255,0.03);padding:6px 10px;border-radius:8px;color:var(--muted);cursor:pointer;margin-left:8px}
+    .small{font-size:13px;color:var(--muted)}
+    .notice{font-size:13px;color:#ffdca6;background:rgba(255,220,170,0.06);padding:8px;border-radius:8px;margin-top:10px}
+    .top-actions{display:flex;gap:8px;align-items:center}
+    .copy-all{background:#1f2937;border:1px solid rgba(255,255,255,0.03);padding:6px 10px;border-radius:8px;color:var(--muted);cursor:pointer}
+    .hidden{display:none}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Personalien-Extractor (HTML)</h1>
+        <p class="lead">Füge den Text (z. B. aus PDFs) in das Feld und klicke auf <strong>Extrahieren</strong>. Alle erkannten Angaben (Person, Tatort, Zeit, Sachbearbeiter, Vorgangskennung usw.) werden oben angezeigt. Einzelne Werte lassen sich per Klick in die Zwischenablage kopieren.</p>
+      </div>
+    </header>
+
+    <label for="input">Rohtext (aus PDF):</label>
+    <textarea id="input" placeholder="Hier den Text einkopieren..."></textarea>
+
+    <div class="controls">
+      <button id="extract">Extrahieren</button>
+      <button id="clear">Feld leeren</button>
+      <div style="flex:1"></div>
+      <div class="top-actions">
+        <button id="copyAllShown" class="copy-all hidden">Alle sichtbaren Felder kopieren</button>
+      </div>
+    </div>
+
+    <div id="notice" class="notice">Hinweis: Die Seite verwendet die moderne Clipboard-API (<code>navigator.clipboard.writeText</code>). Damit das Kopieren ohne Browserabfrage funktioniert, muss die Seite in einem sicheren Kontext laufen (https oder <code>http://localhost</code>).</div>
+
+    <div id="results" class="results"></div>
+  </div>
+
+  <script>
+    // --- Regex-Blöcke ---
+    const reBlocks = /rechtmäßige Personalie[\s\S]*?(?=(?:rechtmäßige Personalie|$))/gi;
+
+    // --- Globale Extraktion (Sachbearbeiter, ViVA, Tatort, Tatzeit) ---
+    function extractGlobalData(text){
+      const out = { 
+        sachbearbeiter:'', 
+        vorgangskennung:'', 
+        unfallort:'', 
+        tatDatum1:'', 
+        tatUhrzeit1:'', 
+        tatDatum2:'', 
+        tatUhrzeit2:'',
+        ereignisDelikt: '',
+        straftatenschluessel: '',
+        beschuldigten: '',
+        staZeichen: '',
+        verfuegung: ''
+      };
+
+      // Bestehende Extraktionen
+      const sb = text.match(/Sachbearbeitung durch[^\n]*\n([^\n]+)/i);
+      if(sb) out.sachbearbeiter = sb[1].trim();
+
+      const viva = text.match(/ViVA\s*Vorgangskennung\s*([A-Za-z0-9\-]+)/i);
+      if(viva) out.vorgangskennung = viva[1].trim();
+
+      // KORRIGIERT: Nur den Straßennamen ohne "Straße" extrahieren
+      const tatort = text.match(/(?:Tatort|Unfallort)[\s\S]{0,200}?Straße\s+([^\n]+)/i);
+      if(tatort) {
+        // Entferne "Straße" vom Anfang falls vorhanden
+        out.unfallort = tatort[1].trim().replace(/^Straße\s*/i, '');
+      }
+
+      const anfang = text.match(/(?:Tatzeit|Unfallzeit)[\s\S]{0,200}?Anfang\s*(\d{2}\.\d{2}\.\d{4}),\s*(\d{1,2}:\d{2})/i);
+      if(anfang){ out.tatDatum1 = anfang[1]; out.tatUhrzeit1 = anfang[2]; }
+      
+      const ende = text.match(/(?:Tatzeit|Unfallzeit)[\s\S]{0,200}?Ende\s*(\d{2}\.\d{2}\.\d{4}),\s*(\d{1,2}:\d{2})/i);
+      if(ende){ out.tatDatum2 = ende[1]; out.tatUhrzeit2 = ende[2]; }
+
+      // NEUE EXTRACTION: Ereignis/Delikt und Straftatenschlüssel
+      const ereignisMatch = text.match(/Ereignis\s*\/\s*Delikt\s+([^\n\r]+)/i);
+      if(ereignisMatch) out.ereignisDelikt = ereignisMatch[1].trim();
+
+      const straftatenMatch = text.match(/Straftatenschlüssel\s+([0-9]+)/i);
+      if(straftatenMatch) out.straftatenschluessel = straftatenMatch[1].trim();
+
+      // NEUE EXTRACTION: Beschuldigten (allgemein)
+      const beschuldigtenMatch = text.match(/Beschuldigten\s+([^\n\r]+)/i);
+      if(beschuldigtenMatch) out.beschuldigten = beschuldigtenMatch[1].trim();
+
+      // NEUE EXTRACTION: Verfügung (wenn "Vfg." und "Beschuldigten" im Kontext)
+      const verfuegungMatch = text.match(/([A-Za-z0-9\s]+\s+\d+\/\d+)\s+Vfg\.\s+[\s\S]{0,500}?Beschuldigten\s+([^\n\r]+)/i);
+      if(verfuegungMatch) {
+        out.staZeichen = verfuegungMatch[1].trim();
+        out.beschuldigten = verfuegungMatch[2].trim();
+        
+        // Datum aus dem Verfügungskontext extrahieren
+        const datumMatch = text.match(/(\d{2}\.\d{2}\.\d{4})/);
+        if(datumMatch) out.verfuegung = datumMatch[1];
+      }
+
+      return out;
+    }
+
+    function showGlobalData(g, res){
+      const card = document.createElement('div'); 
+      card.className = 'card';
+      const header = document.createElement('div'); 
+      header.className = 'person-header'; 
+      header.innerHTML = '<strong>Allgemeine Daten</strong>';
+      card.appendChild(header);
+      
+      // Für allgemeine Daten: Nur Felder mit Werten anzeigen
+      if(g.sachbearbeiter) addField(card,'Sachbearbeiter', g.sachbearbeiter, true);
+      if(g.vorgangskennung) addField(card,'ViVA Vorgangskennung', g.vorgangskennung, true);
+      if(g.unfallort) addField(card,'Unfallort / Tatort', g.unfallort, true);
+      if(g.tatDatum1) addField(card,'Tatzeit Datum (Anfang)', g.tatDatum1, true);
+      if(g.tatUhrzeit1) addField(card,'Tatzeit Uhrzeit (Anfang)', g.tatUhrzeit1, true);
+      if(g.tatDatum2) addField(card,'Tatzeit Datum (Ende)', g.tatDatum2, true);
+      if(g.tatUhrzeit2) addField(card,'Tatzeit Uhrzeit (Ende)', g.tatUhrzeit2, true);
+      
+      // NEUE FELDER: Ereignis/Delikt und Straftatenschlüssel
+      if(g.ereignisDelikt) addField(card,'Ereignis / Delikt', g.ereignisDelikt, true);
+      if(g.straftatenschluessel) addField(card,'Straftatenschlüssel', g.straftatenschluessel, true);
+      
+      // NEUE FELDER: Verfügung und Beschuldigten
+      if(g.beschuldigten) addField(card,'Beschuldigten', g.beschuldigten, true);
+      if(g.staZeichen) addField(card,'StA Zeichen', g.staZeichen, true);
+      if(g.verfuegung) addField(card,'Verfügung', g.verfuegung, true);
+      
+      res.appendChild(card);
+    }
+
+    // --- Personalien-Block-Extraktion ---
+    let extractedPersons = [];
+    
+    function extractFromBlock(blockText){
+      const b = blockText.replace(/\r/g,'').trim();
+      const out = { 
+        raw:b, 
+        name:'', 
+        vorname:'', 
+        geburtsdatum:'', 
+        geburtsort:'', 
+        meldeanschrift:'', 
+        plz:'', 
+        ort:'' 
+      };
+
+      const nameMatch = b.match(/rechtmäßige Personalie\s*([^,\n]+)\s*,\s*([^\n]+)/i);
+      if(nameMatch){ 
+        out.name = nameMatch[1].trim(); 
+        out.vorname = nameMatch[2].trim(); 
+      }
+
+      const ruf = b.match(/Rufname\s+([^\n]+)/i);
+      if(ruf && !out.vorname) out.vorname = ruf[1].trim();
+
+      const gdat = b.match(/Geburtsdatum\s*([0-3]?\d\.[01]?\d\.[0-9]{4})/i);
+      if(gdat) out.geburtsdatum = gdat[1].trim();
+
+      const gort = b.match(/Geburtsort\s*([^\n]+)/i);
+      if(gort) out.geburtsort = gort[1].trim();
+
+      // KORRIGIERT: Nur die Adresse ohne "Meldeanschrift" extrahieren
+      const addrMatch = b.match(/(?:Meldeanschrift|Geschäftsanschrift|Aufenthaltsort|Hauptwohnsitz)\s+([^\n\r]+)/i);
+      if(addrMatch) {
+        // Entferne die Bezeichnung vom Anfang
+        out.meldeanschrift = addrMatch[1].trim().replace(/^(Meldeanschrift|Geschäftsanschrift|Aufenthaltsort|Hauptwohnsitz)\s*/i, '');
+      }
+
+      const plzOrt = b.match(/PLZ\s*Ort(?:\s*\/\s*Ortsteil)?\s*([0-9]{4,5})\s+([^\n\r]+)/i);
+      if(plzOrt){ 
+        out.plz = plzOrt[1].trim(); 
+        out.ort = plzOrt[2].split('/')[0].trim().replace(/Gemeindeschlüssel.*$/i,'').trim(); 
+      }
+
+      return out;
+    }
+
+    // --- Hilfsfunktionen UI / copy ---
+    function addField(card,label,value, skipEmpty = false){
+      // Wenn skipEmpty=true und Wert leer, dann überspringen
+      if (skipEmpty && !value) return;
+      
+      const f = document.createElement('div'); 
+      f.className='field';
+      const lab = document.createElement('div'); 
+      lab.className='label'; 
+      lab.textContent = label+':';
+      const val = document.createElement('div'); 
+      val.className='value'; 
+      val.textContent = value || '';
+      const cb = document.createElement('button'); 
+      cb.className='copy-btn'; 
+      cb.textContent='Kopieren';
+      cb.addEventListener('click', ()=> copyText(value));
+      f.appendChild(lab); 
+      f.appendChild(val); 
+      f.appendChild(cb);
+      card.appendChild(f);
+    }
+
+    async function copyText(text){
+      if(!text){ alert('Kein Wert vorhanden'); return; }
+      try{ 
+        await navigator.clipboard.writeText(text); 
+        showTempMessage('In Zwischenablage kopiert ✔'); 
+      }
+      catch(e){ 
+        const ta=document.createElement('textarea'); 
+        ta.value=text; 
+        document.body.appendChild(ta); 
+        ta.select(); 
+        document.execCommand('copy'); 
+        ta.remove(); 
+        showTempMessage('In Zwischenablage kopiert (Fallback) ✔'); 
+      }
+    }
+
+    function showTempMessage(msg){ 
+      const n=document.getElementById('notice'); 
+      const prev=n.textContent; 
+      n.textContent=msg; 
+      setTimeout(()=> n.textContent=prev,1600); 
+    }
+
+    function attachToggleHandlers(){
+      document.querySelectorAll('.toggle-btn').forEach(btn=>{
+        btn.onclick=()=>{
+          const card=btn.closest('.card');
+          const fields=card.querySelectorAll('.field');
+          fields.forEach(f=>f.classList.toggle('hidden'));
+          btn.textContent=(btn.textContent==='Ausblenden')?'Einblenden':'Ausblenden';
+        };
+      });
+    }
+
+    // JSON Export
+    document.addEventListener('DOMContentLoaded',()=>{
+      const exportBtn = document.createElement('button');
+      exportBtn.className = 'export-json';
+      exportBtn.textContent = 'JSON Exportieren';
+      exportBtn.onclick = ()=>{
+        // Nur sichtbare Karten exportieren
+        const visibleCards = Array.from(document.querySelectorAll('.card')).filter(card=>{
+          const fields = card.querySelectorAll('.field');
+          return Array.from(fields).some(f => !f.classList.contains('hidden'));
+        });
+
+        const data = visibleCards.map(card=>{
+          const vals = {};
+          card.querySelectorAll('.field').forEach(f=>{
+            const k = f.querySelector('.label').textContent.replace(':','').trim();
+            const v = f.querySelector('.value').textContent;
+            vals[k]=v;
+          });
+          return vals;
+        });
+
+        const json = JSON.stringify(data,null,2);
+        const blob = new Blob([json],{type:'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); 
+        a.href = url; 
+        a.download = 'personalien.json'; 
+        a.click(); 
+        URL.revokeObjectURL(url);
+      };
+      const topActions = document.querySelector('.top-actions');
+      if(topActions) topActions.appendChild(exportBtn);
+    });
+
+    // --- Button-Handler ---
+    document.getElementById('extract').addEventListener('click', ()=>{
+      try{
+        const raw = document.getElementById('input').value || '';
+        const res = document.getElementById('results'); 
+        res.innerHTML = '';
+        
+        if(!raw.trim()){ 
+          alert('Bitte Text eingeben.'); 
+          return; 
+        }
+
+        const global = extractGlobalData(raw); 
+        showGlobalData(global,res);
+
+        const blocks = raw.match(reBlocks) || [];
+        
+        // Duplikate filtern (Name|Vorname|Geburtsdatum)
+        const unique = {};
+        const persons = blocks.map(blockText => extractFromBlock(blockText)).filter(p => {
+          const key = ((p.name||'') + '|' + (p.vorname||'') + '|' + (p.geburtsdatum||'')).toLowerCase();
+          if(unique[key]) return false;
+          unique[key] = true;
+          return true;
+        });
+
+        // Speicherung Liste
+        extractedPersons = persons;
+        
+        // Erzeuge Cards für eindeutige Personen
+        persons.forEach(p => {
+          const card = document.createElement('div'); 
+          card.className = 'card';
+          const header=document.createElement('div'); 
+          header.className='person-header'; 
+          header.innerHTML = '<strong>rechtmäßige Personalie</strong> <button class="toggle-btn">Ausblenden</button>';
+          card.appendChild(header);
+          
+          // Für Personalien: Auch leere Felder anzeigen (skipEmpty=false)
+          addField(card,'Name', p.name, false);
+          addField(card,'Vorname', p.vorname, false);
+          addField(card,'Geburtsdatum', p.geburtsdatum, false);
+          addField(card,'Geburtsort', p.geburtsort, false);
+          addField(card,'Meldeanschrift', p.meldeanschrift, false);
+          addField(card,'PLZ', p.plz, false);
+          addField(card,'Ort', p.ort, false);
+          
+          res.appendChild(card);
+        });
+        
+        // attach toggle handlers for new cards
+        attachToggleHandlers();
+        
+      }catch(err){ 
+        console.error(err); 
+        alert('Fehler beim Extrahieren — siehe Konsole.'); 
+      }
+    });
+
+    document.getElementById('clear').addEventListener('click', ()=>{ 
+      document.getElementById('input').value=''; 
+      document.getElementById('results').innerHTML=''; 
+      const copyAll = document.getElementById('copyAllShown'); 
+      if(copyAll) copyAll.classList.add('hidden'); 
+    });
+  </script>
+</body>
+</html>
